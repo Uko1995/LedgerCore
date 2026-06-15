@@ -1,5 +1,7 @@
 package com.example.LedgerCore.controller;
 
+import com.example.LedgerCore.dto.ApiResponse;
+import com.example.LedgerCore.dto.ReleaseRequest;
 import com.example.LedgerCore.dto.ReserveRequest;
 import com.example.LedgerCore.dto.ReserveResponse;
 import com.example.LedgerCore.service.ReservationService;
@@ -17,20 +19,39 @@ public class ReservationController {
     private final ReservationService service;
 
     @GetMapping("/")
-    public String home() {
-        return "LedgerCore API is running.";
+    public ResponseEntity<ApiResponse<String>> home() {
+        return ResponseEntity.ok(ApiResponse.success(200, "LedgerCore API is running"));
     }
 
     @PostMapping(path = "/reserve", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ReserveResponse> reserve(@Valid @RequestBody ReserveRequest req) {
+    public ResponseEntity<ApiResponse<ReserveResponse>> reserve(@Valid @RequestBody ReserveRequest req) {
         ReserveResponse resp = service.reserve(req);
-        return ResponseEntity.status(HttpStatus.CREATED).body(resp);
+        boolean isFailed = "FAILED".equals(resp.getStatus());
+        if (isFailed) {
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(ApiResponse.error(201, resp.getMessage(), resp));
+        }
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.success(201, "Reservation created", resp));
     }
 
     @PostMapping(path = "/release/{reservationId}")
-    public ResponseEntity<Void> release(@PathVariable String reservationId) {
-        service.release(reservationId);
-        return ResponseEntity.ok().build();
+    public ResponseEntity<ApiResponse<ReserveResponse>> release(@PathVariable String reservationId) {
+        return doRelease(service.release(reservationId));
+    }
+
+    @PostMapping(path = "/release", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ApiResponse<ReserveResponse>> releaseByBody(@Valid @RequestBody ReleaseRequest req) {
+        return doRelease(service.release(req.getReservationId()));
+    }
+
+    private ResponseEntity<ApiResponse<ReserveResponse>> doRelease(ReserveResponse resp) {
+        boolean isFailed = "FAILED".equals(resp.getStatus());
+        if (isFailed) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body(ApiResponse.error(409, resp.getMessage(), resp));
+        }
+        return ResponseEntity.ok(ApiResponse.success(200, "Reservation released", resp));
     }
 }
 

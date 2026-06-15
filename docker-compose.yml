@@ -1,12 +1,14 @@
 services:
   db:
     image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ledger-db
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
     ports:
       - "1433:1433"
     volumes:
+      - db-data:/var/opt/mssql
       - ./db-init/init-db.sh:/init-db.sh
     entrypoint: ["/bin/bash", "/init-db.sh"]
     healthcheck:
@@ -15,16 +17,38 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    networks:
+      - ledger-network
 
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ledger-app
     ports:
       - "8081:8081"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
       JDBC_DATABASE_URL: jdbc:sqlserver://db:1433;databaseName=ledger_mock;encrypt=false;trustServerCertificate=true
       JDBC_DATABASE_USERNAME: ${JDBC_DATABASE_USERNAME}
       JDBC_DATABASE_PASSWORD: ${JDBC_DATABASE_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+    networks:
+      - ledger-network
+
+networks:
+  ledger-network:
+    driver: bridge
+    name: ledger-network
+
+volumes:
+  db-data:
 

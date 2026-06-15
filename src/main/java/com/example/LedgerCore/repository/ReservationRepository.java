@@ -26,5 +26,7 @@ public interface ReservationRepository extends JpaRepository<Reservation, UUID> 
                            @Param("now") Instant now);
 
     boolean existsByReservationId(String reservationId);
+
+    Optional<Reservation> findByTransactionId(String transactionId);
 }
 

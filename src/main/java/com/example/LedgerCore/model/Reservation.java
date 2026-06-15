@@ -25,7 +25,7 @@ public class Reservation {
     @Column(name = "reservation_id", nullable = false, unique = true)
     private String reservationId;
 
-    @Column(name = "transaction_id", nullable = false)
+    @Column(name = "transaction_id", nullable = false, unique = true)
     private String transactionId;
 
     @Column(nullable = false, precision = 15, scale = 2)

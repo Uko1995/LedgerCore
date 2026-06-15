@@ -1,16 +1,13 @@
 package com.example.LedgerCore.controller;
 
+import com.example.LedgerCore.dto.ReleaseRequest;
 import com.example.LedgerCore.dto.ReserveRequest;
 import com.example.LedgerCore.dto.ReserveResponse;
-import com.example.LedgerCore.service.ReservationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.EntityNotFoundException;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
@@ -66,9 +63,38 @@ class ReservationControllerTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(validRequest())))
                     .andExpect(status().isCreated())
-                    .andExpect(jsonPath("$.reservationId").value("RES-ABCD1234"))
-                    .andExpect(jsonPath("$.status").value("RESERVED"))
-                    .andExpect(jsonPath("$.message").value("Reserved"));
+                    .andExpect(jsonPath("$.status").value(201))
+                    .andExpect(jsonPath("$.message").value("Reservation created"))
+                    .andExpect(jsonPath("$.data.reservationId").value("RES-ABCD1234"))
+                    .andExpect(jsonPath("$.data.status").value("RESERVED"))
+                    .andExpect(jsonPath("$.data.message").value("Reserved"))
+                    .andExpect(jsonPath("$.data.reason").doesNotExist())
+                    .andExpect(jsonPath("$.timestamp").isNotEmpty());
+        }
+
+        @Test
+        @DisplayName("should return 201 with FAILED status, message, and reason when reservation fails")
+        void shouldReturn201WithReasonWhenFailed() throws Exception {
+            ReserveResponse resp = ReserveResponse.builder()
+                    .reservationId("RES-FAILED")
+                    .status("FAILED")
+                    .message("Insufficient balance: available=100, required=500")
+                    .reason("Insufficient balance: available=100, required=500")
+                    .build();
+
+            when(service.reserve(any(ReserveRequest.class))).thenReturn(resp);
+
+            mockMvc.perform(post("/reserve")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(validRequest())))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.success").value(false))
+                    .andExpect(jsonPath("$.status").value(201))
+                    .andExpect(jsonPath("$.message").value("Insufficient balance: available=100, required=500"))
+                    .andExpect(jsonPath("$.data.reservationId").value("RES-FAILED"))
+                    .andExpect(jsonPath("$.data.status").value("FAILED"))
+                    .andExpect(jsonPath("$.data.reason").value("Insufficient balance: available=100, required=500"))
+                    .andExpect(jsonPath("$.timestamp").isNotEmpty());
         }
 
         @Test
@@ -316,61 +342,98 @@ class ReservationControllerTest {
     @DisplayName("POST /release/{reservationId}")
     class ReleaseEndpoint {
 
+        private ReserveResponse releaseResponse;
+
+        @BeforeEach
+        void setUp() {
+            releaseResponse = ReserveResponse.builder()
+                    .reservationId("RES-ABCD1234")
+                    .status("RELEASED")
+                    .message("Released")
+                    .build();
+        }
+
         @Test
         @DisplayName("should return 200 OK when release succeeds")
         void shouldReturn200() throws Exception {
-            doNothing().when(service).release("RES-ABCD1234");
+            when(service.release("RES-ABCD1234")).thenReturn(releaseResponse);
 
             mockMvc.perform(post("/release/{reservationId}", "RES-ABCD1234"))
-                    .andExpect(status().isOk());
-        }
-
-        @Test
-        @DisplayName("should return 404 when reservation not found")
-        void shouldReturn404WhenNotFound() throws Exception {
-            String reservationId = "RES-NONEXISTENT";
-            doThrow(new EntityNotFoundException("Reservation not found"))
-                    .when(service).release(reservationId);
-
-            mockMvc.perform(post("/release/{reservationId}", reservationId))
-                    .andExpect(status().isNotFound())
-                    .andExpect(jsonPath("$.status").value(404))
-                    .andExpect(jsonPath("$.error").value("Reservation not found"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value(200))
+                    .andExpect(jsonPath("$.message").value("Reservation released"))
+                    .andExpect(jsonPath("$.data.status").value("RELEASED"))
+                    .andExpect(jsonPath("$.data.message").value("Released"))
                     .andExpect(jsonPath("$.timestamp").isNotEmpty());
         }
 
         @Test
-        @DisplayName("should return 409 when reservation already released")
-        void shouldReturn409WhenAlreadyReleased() throws Exception {
-            String reservationId = "RES-ALREADY-RELEASED";
-            doThrow(new IllegalStateException("Reservation already released"))
-                    .when(service).release(reservationId);
+        @DisplayName("should return 409 Conflict when reservation not found")
+        void shouldReturnFailedWhenReservationNotFound() throws Exception {
+            String reservationId = "RES-NONEXISTENT";
+            ReserveResponse failedResp = ReserveResponse.builder()
+                    .reservationId(reservationId)
+                    .status("FAILED")
+                    .message("Reservation not found")
+                    .reason("Reservation not found: " + reservationId)
+                    .build();
+            when(service.release(reservationId)).thenReturn(failedResp);
 
             mockMvc.perform(post("/release/{reservationId}", reservationId))
                     .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.success").value(false))
                     .andExpect(jsonPath("$.status").value(409))
-                    .andExpect(jsonPath("$.error").value("Reservation already released"))
+                    .andExpect(jsonPath("$.message").value("Reservation not found"))
+                    .andExpect(jsonPath("$.data.status").value("FAILED"))
+                    .andExpect(jsonPath("$.data.reason").value("Reservation not found: RES-NONEXISTENT"))
                     .andExpect(jsonPath("$.timestamp").isNotEmpty());
         }
 
         @Test
-        @DisplayName("FAULT: no @Valid/@NotBlank on path variable – empty string is not validated")
-        void emptyReservationIdReturns500InsteadOf400() throws Exception {
-            // FAULT: The path variable has no validation annotations.
-            // An empty reservationId is forwarded to the service without rejection.
-            // Since the service doesn't validate either, it reaches the repository
-            // and eventually produces a confusing error.
-            // The resulting stack trace is caught by the global Exception handler,
-            // returning 500 instead of a meaningful 400-level error.
+        @DisplayName("should return 409 Conflict when reservation already released")
+        void shouldReturnFailedWhenAlreadyReleased() throws Exception {
+            String reservationId = "RES-ALREADY-RELEASED";
+            ReserveResponse failedResp = ReserveResponse.builder()
+                    .reservationId(reservationId)
+                    .status("FAILED")
+                    .message("Reservation already released or failed")
+                    .reason("Release attempted on non-reserved reservation: status=RELEASED")
+                    .build();
+            when(service.release(reservationId)).thenReturn(failedResp);
+
+            mockMvc.perform(post("/release/{reservationId}", reservationId))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.success").value(false))
+                    .andExpect(jsonPath("$.status").value(409))
+                    .andExpect(jsonPath("$.message").value("Reservation already released or failed"))
+                    .andExpect(jsonPath("$.data.status").value("FAILED"))
+                    .andExpect(jsonPath("$.data.reason").value("Release attempted on non-reserved reservation: status=RELEASED"))
+                    .andExpect(jsonPath("$.timestamp").isNotEmpty());
+        }
+
+        @Test
+        @DisplayName("FAULT: no @Valid/@NotBlank on path variable – empty string not rejected")
+        void emptyReservationIdReturns409WithFailed() throws Exception {
+            ReserveResponse failedResp = ReserveResponse.builder()
+                    .reservationId("")
+                    .status("FAILED")
+                    .message("Reservation not found")
+                    .reason("Reservation not found: ")
+                    .build();
+            when(service.release("")).thenReturn(failedResp);
+
             mockMvc.perform(post("/release/{reservationId}", ""))
-                    .andExpect(status().is5xxServerError());
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.success").value(false))
+                    .andExpect(jsonPath("$.data.status").value("FAILED"));
         }
 
         @Test
         @DisplayName("should return 200 with special characters in reservationId")
         void shouldHandleSpecialCharacters() throws Exception {
             String reservationId = "RES-SPECIAL!@#";
-            doNothing().when(service).release(reservationId);
+            releaseResponse.setReservationId(reservationId);
+            when(service.release(reservationId)).thenReturn(releaseResponse);
 
             mockMvc.perform(post("/release/{reservationId}", reservationId))
                     .andExpect(status().isOk());
@@ -380,12 +443,11 @@ class ReservationControllerTest {
         @DisplayName("should return generic error message for unexpected exceptions")
         void shouldReturnGenericErrorMessage() throws Exception {
             String reservationId = "RES-ERROR";
-            doThrow(new RuntimeException("Internal database connection failed: timeout"))
-                    .when(service).release(reservationId);
+            when(service.release(reservationId)).thenThrow(new RuntimeException("Internal database connection failed: timeout"));
 
             mockMvc.perform(post("/release/{reservationId}", reservationId))
                     .andExpect(status().isInternalServerError())
-                    .andExpect(jsonPath("$.error").value("Internal server error"))
+                    .andExpect(jsonPath("$.message").value("Internal server error"))
                     .andExpect(jsonPath("$.status").value(500));
         }
 
@@ -393,10 +455,66 @@ class ReservationControllerTest {
         @DisplayName("should release with UUID-style reservationId")
         void shouldReleaseWithUuidStyleId() throws Exception {
             String reservationId = "RES-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
-            doNothing().when(service).release(reservationId);
+            releaseResponse.setReservationId(reservationId);
+            when(service.release(reservationId)).thenReturn(releaseResponse);
 
             mockMvc.perform(post("/release/{reservationId}", reservationId))
                     .andExpect(status().isOk());
+        }
+    }
+
+    @Nested
+    @DisplayName("POST /release (body)")
+    class ReleaseByBodyEndpoint {
+
+        @Test
+        @DisplayName("should return 200 OK when release via body succeeds")
+        void shouldReturn200() throws Exception {
+            when(service.release("RES-BODY-1234")).thenReturn(
+                    ReserveResponse.builder()
+                            .reservationId("RES-BODY-1234")
+                            .status("RELEASED")
+                            .message("Released")
+                            .build());
+
+            mockMvc.perform(post("/release")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(
+                                    ReleaseRequest.builder().reservationId("RES-BODY-1234").build())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value(200))
+                    .andExpect(jsonPath("$.message").value("Reservation released"))
+                    .andExpect(jsonPath("$.data.status").value("RELEASED"));
+        }
+
+        @Test
+        @DisplayName("should return 409 Conflict when release via body fails")
+        void shouldReturn409() throws Exception {
+            when(service.release("RES-BODY-FAIL")).thenReturn(
+                    ReserveResponse.builder()
+                            .reservationId("RES-BODY-FAIL")
+                            .status("FAILED")
+                            .message("Reservation not found")
+                            .reason("Reservation not found: RES-BODY-FAIL")
+                            .build());
+
+            mockMvc.perform(post("/release")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(
+                                    ReleaseRequest.builder().reservationId("RES-BODY-FAIL").build())))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.success").value(false))
+                    .andExpect(jsonPath("$.status").value(409))
+                    .andExpect(jsonPath("$.data.status").value("FAILED"));
+        }
+
+        @Test
+        @DisplayName("should return 400 when reservationId is missing in body")
+        void shouldReturn400WhenMissingId() throws Exception {
+            mockMvc.perform(post("/release")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{}"))
+                    .andExpect(status().isBadRequest());
         }
     }
 }

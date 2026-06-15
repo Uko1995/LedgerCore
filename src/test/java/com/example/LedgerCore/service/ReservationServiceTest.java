@@ -2,10 +2,12 @@ package com.example.LedgerCore.service;
 
 import com.example.LedgerCore.dto.ReserveRequest;
 import com.example.LedgerCore.dto.ReserveResponse;
+import com.example.LedgerCore.model.Account;
+import com.example.LedgerCore.model.AccountStatus;
 import com.example.LedgerCore.model.Reservation;
 import com.example.LedgerCore.model.ReservationStatus;
+import com.example.LedgerCore.repository.AccountRepository;
 import com.example.LedgerCore.repository.ReservationRepository;
-import jakarta.persistence.EntityNotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -37,6 +39,9 @@ class ReservationServiceTest {
     @Mock
     private ReservationRepository repository;
 
+    @Mock
+    private AccountRepository accountRepository;
+
     private ReservationService service;
 
     @Captor
@@ -44,14 +49,25 @@ class ReservationServiceTest {
 
     private ReserveRequest validRequest;
 
+    private Account validAccount;
+
     @BeforeEach
     void setUp() {
-        service = new ReservationService(repository);
+        service = new ReservationService(repository, accountRepository);
         validRequest = ReserveRequest.builder()
                 .transactionId("txn-123")
                 .amount(new BigDecimal("100.00"))
                 .currency("USD")
                 .merchantId("merchant-1")
+                .build();
+        validAccount = Account.builder()
+                .id(UUID.randomUUID())
+                .accountId("ACC-12345678")
+                .merchantId("merchant-1")
+                .accountName("Merchant One")
+                .currency("USD")
+                .balance(new BigDecimal("500.00"))
+                .status(AccountStatus.ACTIVE)
                 .build();
     }
 
@@ -59,8 +75,13 @@ class ReservationServiceTest {
     @DisplayName("reserve()")
     class ReserveTests {
 
+        @BeforeEach
+        void setUp() {
+            when(accountRepository.findByMerchantIdWithLock("merchant-1")).thenReturn(Optional.of(validAccount));
+        }
+
         @Test
-        @DisplayName("should create reservation and return response with status RESERVED")
+        @DisplayName("should create reservation, deduct balance, and return RESERVED")
         void shouldCreateReservationSuccessfully() {
             when(repository.save(any(Reservation.class))).thenAnswer(inv -> {
                 Reservation r = inv.getArgument(0);
@@ -73,7 +94,10 @@ class ReservationServiceTest {
             assertThat(response).isNotNull();
             assertThat(response.getStatus()).isEqualTo("RESERVED");
             assertThat(response.getMessage()).isEqualTo("Reserved");
+            assertThat(response.getReason()).isNull();
             assertThat(response.getReservationId()).startsWith("RES-");
+            assertThat(validAccount.getBalance()).isEqualByComparingTo(new BigDecimal("400.00"));
+            verify(accountRepository).save(validAccount);
         }
 
         @Test
@@ -122,17 +146,23 @@ class ReservationServiceTest {
         }
 
         @Test
-        @DisplayName("FAULT: should enforce unique transactionId – currently allows duplicates")
-        void shouldRejectDuplicateTransactionId() {
-            when(repository.save(any(Reservation.class))).thenAnswer(inv -> inv.getArgument(0));
+        @DisplayName("should return existing reservation for duplicate transactionId")
+        void shouldReturnExistingForDuplicateTransactionId() {
+            final Reservation[] saved = new Reservation[1];
+            when(repository.save(any(Reservation.class))).thenAnswer(inv -> {
+                saved[0] = inv.getArgument(0);
+                saved[0].setId(UUID.randomUUID());
+                return saved[0];
+            });
+            when(repository.findByTransactionId("txn-123"))
+                    .thenReturn(Optional.empty())
+                    .thenAnswer(inv -> Optional.of(saved[0]));
 
-            service.reserve(validRequest);
-            service.reserve(validRequest);
+            ReserveResponse first = service.reserve(validRequest);
+            ReserveResponse second = service.reserve(validRequest);
 
-            verify(repository, times(2)).save(any(Reservation.class));
-            // FAULT: No duplicate transactionId check exists.
-            // Correct behavior: the service should verify no reservation with the same
-            // transactionId already exists before creating a new one.
+            assertThat(second.getReservationId()).isEqualTo(first.getReservationId());
+            verify(repository, times(1)).save(any(Reservation.class));
         }
 
         @Test
@@ -144,9 +174,6 @@ class ReservationServiceTest {
             String hexPart = response.getReservationId().replace("RES-", "");
 
             assertThat(hexPart).hasSize(8);
-            // FAULT: 8 hex chars = ~4.3B possible values. A collision would cause a
-            // DataIntegrityViolationException at the DB level since reservation_id is UNIQUE.
-            // Should use a full UUID or a longer random string.
         }
 
         @Test
@@ -203,6 +230,66 @@ class ReservationServiceTest {
         }
 
         @Test
+        @DisplayName("should return FAILED with reason when merchantId has no account")
+        void shouldReturnFailedWhenMerchantNotFound() {
+            when(accountRepository.findByMerchantIdWithLock("unknown")).thenReturn(Optional.empty());
+
+            ReserveRequest req = ReserveRequest.builder()
+                    .transactionId("txn-unknown")
+                    .amount(new BigDecimal("10.00"))
+                    .currency("USD")
+                    .merchantId("unknown")
+                    .build();
+
+            ReserveResponse response = service.reserve(req);
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("Account not found for merchant: unknown");
+            assertThat(response.getReason()).contains("Account not found for merchant: unknown");
+            verify(repository).save(any(Reservation.class));
+        }
+
+        @Test
+        @DisplayName("should return FAILED status when account is not ACTIVE")
+        void shouldReturnFailedWhenAccountNotActive() {
+            validAccount.setStatus(AccountStatus.SUSPENDED);
+
+            ReserveRequest req = ReserveRequest.builder()
+                    .transactionId("txn-suspended")
+                    .amount(new BigDecimal("10.00"))
+                    .currency("USD")
+                    .merchantId("merchant-1")
+                    .build();
+
+            ReserveResponse response = service.reserve(req);
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("Account is not active");
+            assertThat(response.getReason()).contains("Account is not active");
+            verify(repository).save(any(Reservation.class));
+            verify(accountRepository, never()).save(any(Account.class));
+        }
+
+        @Test
+        @DisplayName("should return FAILED status when balance is insufficient")
+        void shouldReturnFailedWhenInsufficientBalance() {
+            ReserveRequest req = ReserveRequest.builder()
+                    .transactionId("txn-insufficient")
+                    .amount(new BigDecimal("1000.00"))
+                    .currency("USD")
+                    .merchantId("merchant-1")
+                    .build();
+
+            ReserveResponse response = service.reserve(req);
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("Insufficient balance");
+            assertThat(response.getReason()).contains("Insufficient balance");
+            verify(repository).save(any(Reservation.class));
+            verify(accountRepository, never()).save(any(Account.class));
+        }
+
+        @Test
         @DisplayName("FAULT: no merchantId validation – accepts any string including blank")
         void shouldAcceptAnyMerchantId() {
             ReserveRequest req = ReserveRequest.builder()
@@ -213,12 +300,8 @@ class ReservationServiceTest {
                     .build();
 
             when(repository.save(any(Reservation.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(accountRepository.findByMerchantIdWithLock("")).thenReturn(Optional.of(validAccount));
 
-            // FAULT: The ReserveRequest DTO has @NotBlank on merchantId,
-            // so this wouldn't reach the service if validation is in place.
-            // However, if validation is bypassed or somehow not triggered,
-            // the service would persist a reservation with an empty merchantId.
-            // This is a defense-in-depth concern.
             assertThatCode(() -> service.reserve(req)).doesNotThrowAnyException();
         }
     }
@@ -227,128 +310,129 @@ class ReservationServiceTest {
     @DisplayName("release()")
     class ReleaseTests {
 
+        private Reservation reservedReservation;
+        private Account account;
+
+        @BeforeEach
+        void setUp() {
+            account = Account.builder()
+                    .id(UUID.randomUUID())
+                    .accountId("ACC-12345678")
+                    .merchantId("merchant-1")
+                    .accountName("Merchant One")
+                    .currency("USD")
+                    .balance(new BigDecimal("400.00"))
+                    .status(AccountStatus.ACTIVE)
+                    .build();
+
+            reservedReservation = Reservation.builder()
+                    .id(UUID.randomUUID())
+                    .reservationId("RES-12345678")
+                    .transactionId("txn-123")
+                    .amount(new BigDecimal("100.00"))
+                    .currency("USD")
+                    .merchantId("merchant-1")
+                    .status(ReservationStatus.RESERVED)
+                    .createdAt(Instant.now())
+                    .build();
+        }
+
         @Test
-        @DisplayName("should release a RESERVED reservation and update status + releasedAt")
+        @DisplayName("should refund balance and update status to RELEASED")
         void shouldReleaseReservedReservation() {
-            String reservationId = "RES-12345678";
-            when(repository.releaseReservation(
-                    eq(reservationId),
-                    eq(ReservationStatus.RELEASED),
-                    eq(ReservationStatus.RELEASED),
-                    any(Instant.class)))
-                    .thenReturn(1);
+            when(repository.findByReservationId("RES-12345678")).thenReturn(Optional.of(reservedReservation));
+            when(accountRepository.findByMerchantIdWithLock("merchant-1")).thenReturn(Optional.of(account));
 
-            assertThatCode(() -> service.release(reservationId))
-                    .doesNotThrowAnyException();
+            ReserveResponse response = service.release("RES-12345678");
 
-            verify(repository).releaseReservation(
-                    eq(reservationId),
-                    eq(ReservationStatus.RELEASED),
-                    eq(ReservationStatus.RELEASED),
-                    any(Instant.class));
-            verify(repository, never()).existsByReservationId(anyString());
+            assertThat(response.getStatus()).isEqualTo("RELEASED");
+            assertThat(response.getMessage()).isEqualTo("Released");
+            assertThat(account.getBalance()).isEqualByComparingTo(new BigDecimal("500.00"));
+            assertThat(reservedReservation.getStatus()).isEqualTo(ReservationStatus.RELEASED);
+            assertThat(reservedReservation.getReleasedAt()).isNotNull();
+            verify(accountRepository).save(account);
+            verify(repository).save(reservedReservation);
         }
 
         @Test
-        @DisplayName("should throw EntityNotFoundException when reservationId does not exist")
-        void shouldThrowEntityNotFoundException() {
-            String reservationId = "RES-NONEXISTENT";
-            when(repository.releaseReservation(anyString(), any(), any(), any())).thenReturn(0);
-            when(repository.existsByReservationId(reservationId)).thenReturn(false);
+        @DisplayName("should return FAILED with reason when reservation does not exist")
+        void shouldReturnFailedWhenReservationNotFound() {
+            when(repository.findByReservationId("RES-NONEXISTENT")).thenReturn(Optional.empty());
 
-            assertThatThrownBy(() -> service.release(reservationId))
-                    .isInstanceOf(EntityNotFoundException.class)
-                    .hasMessage("Reservation not found");
+            ReserveResponse response = service.release("RES-NONEXISTENT");
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("Reservation not found");
+            assertThat(response.getReason()).contains("Reservation not found");
         }
 
         @Test
-        @DisplayName("should throw IllegalStateException when reservation is already released")
-        void shouldThrowIllegalStateForAlreadyReleased() {
-            String reservationId = "RES-ALREADY-RELEASED";
-            when(repository.releaseReservation(anyString(), any(), any(), any())).thenReturn(0);
-            when(repository.existsByReservationId(reservationId)).thenReturn(true);
+        @DisplayName("should return FAILED with reason when reservation is not RESERVED")
+        void shouldReturnFailedWhenNotReserved() {
+            reservedReservation.setStatus(ReservationStatus.RELEASED);
+            when(repository.findByReservationId("RES-12345678")).thenReturn(Optional.of(reservedReservation));
 
-            assertThatThrownBy(() -> service.release(reservationId))
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessage("Reservation already released");
+            ReserveResponse response = service.release("RES-12345678");
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("already released or failed");
+            assertThat(response.getReason()).contains("non-reserved reservation");
+            assertThat(reservedReservation.getReleasedAt()).isNotNull();
+            verify(repository).save(reservedReservation);
         }
 
         @Test
-        @DisplayName("FAULT: race condition between JPQL update and existsByReservationId check")
-        void raceConditionBetweenUpdateAndExistsCheck() {
-            String reservationId = "RES-RACE";
-            when(repository.releaseReservation(anyString(), any(), any(), any())).thenReturn(0);
-            when(repository.existsByReservationId(reservationId)).thenReturn(true);
+        @DisplayName("should return FAILED with reason for FAILED reservations")
+        void shouldReturnFailedForFailedReservations() {
+            reservedReservation.setStatus(ReservationStatus.FAILED);
+            when(repository.findByReservationId("RES-12345678")).thenReturn(Optional.of(reservedReservation));
 
-            // FAULT: If the releaseReservation query returns 0 because the reservation
-            // doesn't exist at that moment, but a concurrent transaction creates it before
-            // existsByReservationId runs, the service incorrectly throws
-            // "Reservation already released" instead of "Reservation not found".
-            // The two queries are not atomic.
-            assertThatThrownBy(() -> service.release(reservationId))
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessage("Reservation already released");
+            ReserveResponse response = service.release("RES-12345678");
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getMessage()).contains("already released or failed");
+            assertThat(response.getReason()).contains("non-reserved reservation");
+            assertThat(reservedReservation.getReleasedAt()).isNotNull();
+            verify(repository).save(reservedReservation);
         }
 
         @Test
-        @DisplayName("should use @Modifying with clearAutomatically=true to avoid stale entity state")
-        void modifyingUsesClearAutomatically() {
-            String reservationId = "RES-CLEAR";
-            when(repository.releaseReservation(anyString(), any(), any(), any())).thenReturn(1);
+        @DisplayName("should roll back refund when account save fails")
+        void shouldRollbackOnAccountSaveFailure() {
+            when(repository.findByReservationId("RES-12345678")).thenReturn(Optional.of(reservedReservation));
+            when(accountRepository.findByMerchantIdWithLock("merchant-1")).thenReturn(Optional.of(account));
+            doThrow(new RuntimeException("DB error")).when(accountRepository).save(any());
 
-            assertThatCode(() -> service.release(reservationId))
-                    .doesNotThrowAnyException();
+            assertThatThrownBy(() -> service.release("RES-12345678"))
+                    .isInstanceOf(RuntimeException.class);
 
-            verify(repository).releaseReservation(
-                    eq(reservationId),
-                    eq(ReservationStatus.RELEASED),
-                    eq(ReservationStatus.RELEASED),
-                    any(Instant.class));
-        }
-
-        @ParameterizedTest
-        @NullAndEmptySource
-        @ValueSource(strings = {" ", "   ", "\t", "\n"})
-        @DisplayName("FAULT: no input validation on reservationId – null/blank values not rejected")
-        void noValidationOnReservationId(String invalidId) {
-            when(repository.releaseReservation(eq(invalidId), any(), any(), any())).thenReturn(0);
-            when(repository.existsByReservationId(invalidId)).thenReturn(false);
-
-            // FAULT: The service (and controller) should reject null/blank reservationId
-            // with a meaningful error before reaching the repository.
-            // Currently it passes them through, resulting in EntityNotFoundException.
-            assertThatThrownBy(() -> service.release(invalidId))
-                    .isInstanceOf(EntityNotFoundException.class);
-        }
-
-        @Test
-        @DisplayName("should set releasedAt to current time when releasing")
-        void shouldSetReleasedAtToCurrentTime() {
-            String reservationId = "RES-TIME";
-            Instant before = Instant.now();
-
-            when(repository.releaseReservation(
-                    eq(reservationId),
-                    eq(ReservationStatus.RELEASED),
-                    eq(ReservationStatus.RELEASED),
-                    any(Instant.class)))
-                    .thenAnswer(inv -> {
-                        Instant now = inv.getArgument(3);
-                        assertThat(now).isBetween(before, Instant.now());
-                        return 1;
-                    });
-
-            service.release(reservationId);
+            assertThat(reservedReservation.getStatus()).isEqualTo(ReservationStatus.RESERVED);
         }
 
         @Test
         @DisplayName("should release reservation with special characters in reservationId")
         void shouldHandleSpecialCharactersInReservationId() {
             String reservationId = "RES-!@#$%^&*()";
-            when(repository.releaseReservation(anyString(), any(), any(), any())).thenReturn(1);
+            reservedReservation.setReservationId(reservationId);
+            when(repository.findByReservationId(reservationId)).thenReturn(Optional.of(reservedReservation));
+            when(accountRepository.findByMerchantIdWithLock("merchant-1")).thenReturn(Optional.of(account));
 
-            assertThatCode(() -> service.release(reservationId))
-                    .doesNotThrowAnyException();
+            ReserveResponse response = service.release(reservationId);
+
+            assertThat(response.getStatus()).isEqualTo("RELEASED");
+        }
+
+        @ParameterizedTest
+        @NullAndEmptySource
+        @ValueSource(strings = {" ", "   ", "\t", "\n"})
+        @DisplayName("FAULT: no input validation on reservationId – null/blank values not rejected")
+        void shouldReturnFailedForInvalidReservationId(String invalidId) {
+            when(repository.findByReservationId(invalidId)).thenReturn(Optional.empty());
+
+            ReserveResponse response = service.release(invalidId);
+
+            assertThat(response.getStatus()).isEqualTo("FAILED");
+            assertThat(response.getReason()).contains("Reservation not found");
         }
     }
 }

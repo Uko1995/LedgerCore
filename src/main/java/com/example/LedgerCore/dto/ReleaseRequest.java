@@ -1,15 +1,13 @@
 package com.example.LedgerCore.dto;
 
+import jakarta.validation.constraints.NotBlank;
 import lombok.*;
 
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ReserveResponse {
+public class ReleaseRequest {
+    @NotBlank
     private String reservationId;
-    private String status;
-    private String message;
-    private String reason;
 }
-

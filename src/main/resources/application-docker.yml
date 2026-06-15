@@ -2,13 +2,10 @@ server:
   port: ${SERVER_PORT:8081}
 
 spring:
-  application:
-    name: ledger-mock
   datasource:
-    url: ${JDBC_DATABASE_URL:jdbc:sqlserver://localhost:1433;databaseName=ledger_mock;encrypt=false;trustServerCertificate=true}
-    username: ${JDBC_DATABASE_USERNAME:sa}
-    password: ${JDBC_DATABASE_PASSWORD:StrongPass123!}
-    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    url: ${JDBC_DATABASE_URL}
+    username: ${JDBC_DATABASE_USERNAME}
+    password: ${JDBC_DATABASE_PASSWORD}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -29,4 +26,3 @@ management:
 logging:
   level:
     root: ${LOGGING_LEVEL:INFO}
-

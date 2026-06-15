@@ -1,0 +1,6 @@
+# src/main/resources/application-local.yml  ← gitignored
+spring:
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=ledger_mock;encrypt=false;trustServerCertificate=true
+    username: sa
+    password: StrongPass123!
